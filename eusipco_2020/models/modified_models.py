@@ -6,7 +6,7 @@ It is a script for definining CNN model which is modified for better feature rep
 """
 import torch
 import torch.nn as nn
-from torchvision.models import densenet161,resnext101_32x8d,mnasnet1_0
+from torchvision.models import densenet161, resnext101_32x8d, mnasnet1_0
 import torch.nn.functional as F
 
 
@@ -23,7 +23,7 @@ class DenseNet161_Modified(nn.Module):
         L2_NORMED: The output of test pairs are normalized if it is TRUE. For AAMP, LMCP (Margin losses) it should be TRUE
 
     """
-    def __init__(self, embedding_size, class_size=None, pretrained=True, only_embeddings=True,l2_normed=True):
+    def __init__(self, embedding_size, class_size=None, pretrained=True, only_embeddings=True, l2_normed=True):
         super(DenseNet161_Modified, self).__init__()
         self.only_embeddings=only_embeddings
         self.l2_normed=l2_normed
@@ -147,10 +147,10 @@ class MNASNet_Modified(nn.Module):
         L2_NORMED: The output of test pairs are normalized if it is TRUE. For AAMP, LMCP (Margin losses) it should be TRUE
 
     """
-    def __init__(self, embedding_size, class_size=None, pretrained=True, only_embeddings=True,l2_normed=True):
+    def __init__(self, embedding_size, class_size=None, pretrained=True, only_embeddings=True, l2_normed=True):
         super(MNASNet_Modified, self).__init__()
-        self.only_embeddings=only_embeddings
-        self.l2_normed=l2_normed
+        self.only_embeddings = only_embeddings
+        self.l2_normed = l2_normed
         self.model = mnasnet1_0(pretrained=pretrained)
         self.model.classifier = nn.Sequential(
             nn.BatchNorm1d(1280),
@@ -159,7 +159,7 @@ class MNASNet_Modified(nn.Module):
             nn.BatchNorm1d(embedding_size),
         )
         if not self.only_embeddings:
-            self.final=nn.Linear(embedding_size,class_size)
+            self.final = nn.Linear(embedding_size, class_size)
 
         # Weight initialization
         for m in self.model.classifier:
@@ -172,6 +172,7 @@ class MNASNet_Modified(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
     def forward(self, x, train=True):
+        x = rgb_to_grayscale(x, num_output_channels=3)
         out = self.model.layers(x)
         out = out.mean([2, 3])
         if train:
@@ -186,4 +187,35 @@ class MNASNet_Modified(nn.Module):
                 return self.model.classifier(out)
 
 
+def rgb_to_grayscale(img, num_output_channels: int = 1):
+    if img.ndim < 3:
+        raise TypeError(f"Input image tensor should have at least 3 dimensions, but found {img.ndim}")
+    # _assert_channels(img, [1, 3])
 
+    if num_output_channels not in (1, 3):
+        raise ValueError("num_output_channels should be either 1 or 3")
+
+    # r, g, b = img.unbind(dim=-3)
+    r, g, b = img.split(1, dim=-3)
+    r, g, b = r.squeeze(dim=-3), g.squeeze(dim=-3), b.squeeze(dim=-3)  # Remove the channel dimension
+    # This implementation closely follows the TF one:
+    # https://github.com/tensorflow/tensorflow/blob/v2.3.0/tensorflow/python/ops/image_ops_impl.py#L2105-L2138
+    l_img = (0.2989 * r + 0.587 * g + 0.114 * b).to(img.dtype)
+    l_img = l_img.unsqueeze(dim=-3)
+
+    if num_output_channels == 3:
+        return l_img.expand(img.shape)
+
+    return l_img
+
+
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
+if __name__ == '__main__':
+    model = MNASNet_Modified(512)
+    print(model.model)
+    print(model.model.layers)
+    # c = count_parameters(model)
+    # print(c)

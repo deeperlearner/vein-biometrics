@@ -1,0 +1,11 @@
+version: "3.8"
+services:
+    service:
+        image: ubuntu
+        build:
+            context: ./
+            dockerfile: Dockerfile
+        working_dir: /media/back/home/chuck/
+        volumes:
+             - /media/back/home/chuck/:/media/back/home/chuck/
+        command: tail -f /dev/null

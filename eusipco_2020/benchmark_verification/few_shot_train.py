@@ -19,13 +19,18 @@ import numpy as np
 import torch
 from torch.optim import lr_scheduler
 from torch.nn import CrossEntropyLoss
+import torch.nn.functional as F
+import learn2learn as l2l
 
 from utils import FullPairComparer, AverageMeter, evaluate, plot_roc, plot_DET_with_EER, plot_density, accuracy
 from models import MNASNet_Modified as net
-from benchmark_verification import get_dataloader
+from benchmark_verification import get_dataset, get_dataloader
 from losses import *
 
 parser = argparse.ArgumentParser(description='Vein Verification')
+
+parser.add_argument('--N-way', default=5, type=int, help='number of way')
+parser.add_argument('--K-shot', default=1, type=int, help='number of shot')
 
 parser.add_argument('--start-epoch', default=0, type=int, metavar='SE',
                     help='start epoch (default: 0)')
@@ -70,6 +75,48 @@ global best_losss
 best_losss = 100
 global best_test
 best_test = 100
+
+
+def meta_accuracy(predictions, targets):
+    predictions = predictions.argmax(dim=1)
+    acc = (predictions == targets).sum().float()
+    acc /= len(targets)
+    return acc.item()
+
+
+def pairwise_distances_logits(query, support):
+    M = query.size(0)
+    N = support.size(0)
+    A = support.unsqueeze(0).repeat(M, 1, 1)
+    B = query.unsqueeze(1).repeat(1, N, 1)
+    sim = F.cosine_similarity(A, B, dim=2)
+    return 1 - sim
+
+
+def fast_adapt(model, batch, criterion):
+    ways, shot = args.N_way, args.K_shot
+
+    data, labels = batch
+    data = data.to(device)
+    labels = labels.to(device)
+
+    # Compute support and query embeddings
+    embeddings = model(data)
+    support_indices = np.zeros(data.size(0), dtype=bool)
+    selection = np.arange(ways) * (shot + shot)
+    for offset in range(shot):
+        support_indices[selection + offset] = True
+    query_indices = torch.from_numpy(~support_indices)
+    support_indices = torch.from_numpy(support_indices)
+    support = embeddings[support_indices]
+    support = support.reshape(ways, shot, -1).mean(dim=1)
+    query = embeddings[query_indices]
+    labels = labels[query_indices].long()
+
+    logits = pairwise_distances_logits(query, support)
+    loss = criterion(logits, labels)
+    acc = meta_accuracy(logits, labels)
+    return loss, acc
 
 
 def main():
@@ -127,18 +174,53 @@ def main():
         test(model, data_loaders['test'], '00', is_graph=True)
 
     else:
-        for epoch in range(args.start_epoch, args.num_epochs + args.start_epoch):
-            print(80 * '=')
-            print('Epoch [{}/{}]'.format(epoch, args.num_epochs + args.start_epoch - 1))
+        # meta learning hyper-parameters
+        num_epochs = 10 # 1000
+        tps = 8
 
-            data_loaders = get_dataloader(args.database_dir, args.train_dir, args.valid_dir, args.test_dir,
-                                          args.batch_size, args.num_workers)
+        datasets = get_dataset(args.database_dir, args.train_dir, args.valid_dir, args.test_dir)
+        train_set = l2l.data.MetaDataset(datasets['train'])
+        train_tasks = l2l.data.Taskset(
+            train_set,
+            task_transforms=[
+                l2l.data.transforms.NWays(train_set, args.N_way),
+                l2l.data.transforms.KShots(train_set, 2*args.K_shot),
+                l2l.data.transforms.LoadData(train_set),
+                l2l.data.transforms.RemapLabels(train_set),
+                l2l.data.transforms.ConsecutiveLabels(train_set),
+            ]
+        )
+        for epoch in range(num_epochs):
+            model.train()
 
-            train(model, optimizer, epoch, data_loaders['train'], criterion, loss_metric)
-            is_best, acc, loss = validate(model, optimizer, epoch, data_loaders['valid'], criterion, loss_metric)
+            loss_ctr = 0
+            epoch_loss = 0.0
+            epoch_acc = 0.0
+
+            for _ in range(tps):
+                batch = train_tasks.sample()
+
+                loss, acc = fast_adapt(model, batch, criterion)
+
+                loss_ctr += 1
+                epoch_loss += loss.item()
+                epoch_acc += acc
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
             scheduler.step(loss)
-            if is_best and acc > 100:
-                test(model, data_loaders['test'], epoch, is_graph=True)
+            print('Epoch {}, train, loss={:.4f} acc={:.4f}'.format(
+                epoch, epoch_loss/loss_ctr, epoch_acc/loss_ctr))
+
+        os._exit(0)
+
+        train(model, optimizer, epoch, train_loader, criterion, loss_metric)
+        is_best, acc, loss = validate(model, optimizer, epoch, data_loaders['valid'], criterion, loss_metric)
+        scheduler.step(loss)
+        if is_best and acc > 100:
+            test(model, data_loaders['test'], epoch, is_graph=True)
 
         print(80 * '=')
 
@@ -209,38 +291,8 @@ def test(model, dataloader, epoch, is_graph=False):
     return EER
 
 
-def train(model, optimizer, epoch, dataloader, criterion, metric):
-    with torch.set_grad_enabled(True):
-        losses = AverageMeter()
-        top1 = AverageMeter()
-        model.train()
-
-        for batch_idx, (data, target) in enumerate(dataloader):
-            optimizer.zero_grad()
-            target = target.cuda(non_blocking=True)
-            outputs = model(data.cuda())
-            if metric is not None:
-                outputs = metric(outputs, target)
-            loss = criterion(outputs, target)
-            # print(loss.item())
-            if torch.isnan(loss):
-                print("there is nan!!!!")
-                print(loss)
-                print(model(data.cuda()))
-                print(outputs)
-                # for name, param in model.named_parameters():
-                #     print(name, param.grad.norm())
-                os._exit(1)
-
-            prec1, prec5 = accuracy(outputs, target, topk=(1, 5))
-            losses.update(loss.item(), data.size(0))
-            top1.update(prec1[0], data.size(0))
-            loss.backward()
-            optimizer.step()
-            if batch_idx % 25 == 0:
-                print('Step-{} Prec@1 {top1.avg:.5f} loss@1 - {loss.avg:.5f}'.format(batch_idx, top1=top1, loss=losses))
-
-        print('*TRAIN Prec@1 {top1.avg:.5f} - loss@1 {loss.avg:.5f}'.format(top1=top1, loss=losses))
+def train(model, dataset, criterion, num_tasks=1000, maml_lr=0.01, iterations=1000, tps=8, fas=5):
+    pass
 
 def validate(model, optimizer, epoch, dataloader, criterion, metric):
     global best_losss
@@ -250,7 +302,7 @@ def validate(model, optimizer, epoch, dataloader, criterion, metric):
 
         model.eval()
 
-        for batch_idx, (data, target) in enumerate(dataloader):
+        for batch_idx, (data, target, _) in enumerate(dataloader):
             target = target.cuda(non_blocking=True)
             outputs = model(data.cuda())
             if metric is not None:

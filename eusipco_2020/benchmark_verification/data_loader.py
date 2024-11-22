@@ -5,13 +5,15 @@ ABOUT SCRIPT:
 It is a script to load data for train,validation,test iterations.
 """
 
+import os
+import glob
+from pathlib import Path, PurePath
+
 import torch
 from torchvision import transforms
 from torch.utils.data import Dataset
 import PIL.Image
 import pandas as pd
-import glob
-from pathlib import Path,PurePath
 
 
 def get_instance_data_loader(instance_directory,batch_size=8, num_workers=2):
@@ -33,6 +35,32 @@ def get_instance_data_loader(instance_directory,batch_size=8, num_workers=2):
     return data_loader
 
 
+def get_dataset(database_dir, train_CSV=None, valid_CSV=None, test_CSV=None):
+    im_size = (128, 128)
+    # mean = [0.5247, -0.1672, -0.3146]
+    # std = [0.3191, 0.3067, 0.2794]
+    mean = [0.5, 0.5, 0.5]
+    std = [0.5, 0.5, 0.5]
+    normalize = transforms.Normalize(mean=mean, std=std)
+    datasets = {}
+    if train_CSV is not None:
+        datasets['train'] = DataReader(database_dir, train_CSV,
+                                       transforms.Compose([transforms.Resize(im_size),
+                                                           transforms.ToTensor(),
+                                                           normalize]))
+    if valid_CSV is not None:
+        datasets['valid'] = DataReader(database_dir, valid_CSV,
+                                       transforms.Compose([transforms.Resize(im_size),
+                                                           transforms.ToTensor(),
+                                                           normalize]))
+    if test_CSV is not None:
+        datasets['test'] = PairDataReader(database_dir, test_CSV,
+                                          transforms.Compose([transforms.Resize(im_size),
+                                                              transforms.ToTensor(),
+                                                              normalize]))
+    return datasets
+
+
 def get_dataloader(database_dir, train_CSV=None, valid_CSV=None, test_CSV=None, batch_size=32, num_workers=8):
     """
     DATABASE_DIR: main directoy of images for the whole database
@@ -45,41 +73,48 @@ def get_dataloader(database_dir, train_CSV=None, valid_CSV=None, test_CSV=None, 
     RETURNS: DataLoader for iteration over the given directory
     """
 
-    im_size=(228,228)
-    normalize=transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-    dataloaders={}
+    im_size = (128, 128)
+    # mean = [0.5247, -0.1672, -0.3146]
+    # std = [0.3191, 0.3067, 0.2794]
+    mean = [0.5, 0.5, 0.5]
+    std = [0.5, 0.5, 0.5]
+    normalize = transforms.Normalize(mean=mean, std=std)
+    dataloaders = {}
 
     if train_CSV is not None:
-        dataloaders['train']=torch.utils.data.DataLoader(
+        dataloaders['train'] = torch.utils.data.DataLoader(
             DataReader(database_dir, train_CSV,
                        transforms.Compose([transforms.Resize(im_size),
                                            #transforms.ColorJitter(),
-                                           # #transforms.RandomAffine(degrees=(-2,2),scale=(0.97,1.03),shear=(-2,2)),
+                                           # transforms.RandomAffine(degrees=(-2,2),scale=(0.97,1.03),shear=(-2,2)),
+                                           # transforms.Grayscale(num_output_channels=3),
                                            transforms.ToTensor(),
                                            normalize])),
-            batch_size=batch_size, shuffle=True,num_workers=num_workers, pin_memory=True)
+            batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
+
     if valid_CSV is not None:
         dataloaders['valid'] = torch.utils.data.DataLoader(
             DataReader(database_dir, valid_CSV,
                        transforms.Compose([transforms.Resize(im_size),
                                            transforms.ToTensor(),
                                            normalize])),
-            batch_size=batch_size, shuffle=True,num_workers=num_workers, pin_memory=True)
+            batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
 
     if test_CSV is not None:
-        dataloaders['test'] = torch.utils.data.DataLoader(
-            PairDataReader(database_dir, test_CSV,
-                           transforms.Compose([transforms.Resize(im_size),
-                                               transforms.ToTensor(),
-                                               normalize])),
-            batch_size=int(4 * batch_size), shuffle=False, num_workers=int(num_workers), pin_memory=True)
+        test_dataset = PairDataReader(database_dir, test_CSV,
+                                      transforms.Compose([transforms.Resize(im_size),
+                                                          transforms.ToTensor(),
+                                                          normalize]))
+        dataloaders['test'] = torch.utils.data.DataLoader(test_dataset, batch_size=int(4 * batch_size), shuffle=False, num_workers=int(num_workers), pin_memory=True)
+        # print(len(test_dataset))
+        # os._exit(0)
 
     return dataloaders
 
 
 class PairDataReader(Dataset):
     def __init__(self, database_dir, image_paths, transform=None):
-        self.database_dir=Path(database_dir)
+        self.database_dir = Path(database_dir)
         self.transform = transform
         self.df = pd.read_csv(image_paths)
 
@@ -88,9 +123,9 @@ class PairDataReader(Dataset):
         im_file_2 = self.df['idy'][index]
         img_1 = self.im_reader(self.database_dir.joinpath(im_file_1))
         img_2 = self.im_reader(self.database_dir.joinpath(im_file_2))
-        classname=self.df['class'][index]
+        classname = self.df['class'][index]
 
-        return img_1, img_2,classname
+        return img_1, img_2, classname
 
     def im_reader(self, im_file):
         im = PIL.Image.open(im_file)
@@ -102,15 +137,18 @@ class PairDataReader(Dataset):
 
 class DataReader(Dataset):
     def __init__(self, database_dir, image_paths, transform=None):
-        self.database_dir=Path(database_dir)
+        self.database_dir = Path(database_dir)
         self.transform = transform
         self.df = pd.read_csv(image_paths)
+        self.L_R = {'L': 0, 'R': 100}
 
     def __getitem__(self, index):
         im_file = self.df['idx'][index]
+        LR = im_file[-7]
         img = self.im_reader(self.database_dir.joinpath(im_file))
-        classname=int(self.df['class'][index])
-        return img,classname, im_file
+        classname = int(self.df['class'][index])
+        classname += self.L_R[LR]
+        return img, classname
 
     def im_reader(self,im_file):
         im = PIL.Image.open(im_file)
@@ -123,7 +161,7 @@ class DataReader(Dataset):
 class InstanceReader(Dataset):
     def __init__(self, image_path, transform=None):
         self.transform = transform
-        self.isdir= Path(image_path).is_dir()
+        self.isdir = Path(image_path).is_dir()
         if self.isdir:
             self.files = glob.glob(image_path + '/*')
         else:
@@ -141,3 +179,34 @@ class InstanceReader(Dataset):
 
     def __len__(self):
         return len(self.files)
+
+if __name__ == '__main__':
+    database_dir = "Contactless_Knuckle_Palm_Print_and_Vein_Dataset"
+    train_dir = 'Contactless_Knuckle_Palm_Print_and_Vein_Dataset/CSVFiles/train_dis.csv'
+    valid_dir = 'Contactless_Knuckle_Palm_Print_and_Vein_Dataset/CSVFiles/val_dis.csv'
+    test_dir = 'Contactless_Knuckle_Palm_Print_and_Vein_Dataset/CSVFiles/test_pairs_dis.csv'
+    batch_size = 6
+    num_workers = 16
+    im_size = (128, 128)
+    mean = [0.5, 0.5, 0.5]
+    std = [0.5, 0.5, 0.5]
+    normalize = transforms.Normalize(mean=mean, std=std)
+
+    dataset = DataReader(database_dir, train_dir,
+                         transforms.Compose([transforms.Resize(im_size),
+                                             transforms.ToTensor(),
+                                             normalize]))
+    dataset[0]
+    dataset[1]
+    # data_loaders = get_dataloader(database_dir, train_dir, valid_dir, test_dir, batch_size, num_workers)
+    
+    # data_all = torch.Tensor()
+    # for batch_idx, (data, target, _) in enumerate(data_loaders['train']):
+    #     data_all = torch.cat((data_all, data), dim=0) if data_all.numel() > 0 else data
+    # print(data_all.size())
+    # # Compute mean and standard deviation along dimensions 0, 2, and 3 (batch, height, and width)
+    # mean = data_all.mean(dim=[0, 2, 3])
+    # std = data_all.std(dim=[0, 2, 3])
+
+    # print("Mean:", mean)
+    # print("Std:", std)

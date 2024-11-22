@@ -1,0 +1,1 @@
+python3 train_valid_test_generator.py

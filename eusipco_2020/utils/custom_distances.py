@@ -10,7 +10,7 @@ import torch.nn.functional as F
 
 class FullPairComparer(nn.Module):
 
-    def __init__(self, comparison='euclidian'):
+    def __init__(self, comparison='cosine'):
         super(FullPairComparer, self).__init__()
         if comparison=='euclidian':
             self.pdist = EuclidianDistance()
