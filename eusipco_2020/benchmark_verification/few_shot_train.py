@@ -19,7 +19,6 @@ import numpy as np
 import torch
 from torch.optim import lr_scheduler
 from torch.nn import CrossEntropyLoss
-import torch.nn.functional as F
 import learn2learn as l2l
 
 from utils import FullPairComparer, AverageMeter, evaluate, plot_roc, plot_DET_with_EER, plot_density, accuracy
@@ -84,41 +83,6 @@ def meta_accuracy(predictions, targets):
     return acc.item()
 
 
-def pairwise_distances_logits(query, support):
-    M = query.size(0)
-    N = support.size(0)
-    A = support.unsqueeze(0).repeat(M, 1, 1)
-    B = query.unsqueeze(1).repeat(1, N, 1)
-    sim = F.cosine_similarity(A, B, dim=2)
-    return 1 - sim
-
-
-def fast_adapt(model, batch, criterion):
-    ways, shot = args.N_way, args.K_shot
-
-    data, labels = batch
-    data = data.to(device)
-    labels = labels.to(device)
-
-    # Compute support and query embeddings
-    embeddings = model(data)
-    support_indices = np.zeros(data.size(0), dtype=bool)
-    selection = np.arange(ways) * (shot + shot)
-    for offset in range(shot):
-        support_indices[selection + offset] = True
-    query_indices = torch.from_numpy(~support_indices)
-    support_indices = torch.from_numpy(support_indices)
-    support = embeddings[support_indices]
-    support = support.reshape(ways, shot, -1).mean(dim=1)
-    query = embeddings[query_indices]
-    labels = labels[query_indices].long()
-
-    logits = pairwise_distances_logits(query, support)
-    loss = criterion(logits, labels)
-    acc = meta_accuracy(logits, labels)
-    return loss, acc
-
-
 def main():
     if not os.path.exists(args.outdir):
         os.makedirs(args.outdir)
@@ -175,8 +139,10 @@ def main():
 
     else:
         # meta learning hyper-parameters
-        num_epochs = 10 # 1000
+        maml_lr = 0.01
+        iterations = 1000
         tps = 8
+        fas = 5
 
         datasets = get_dataset(args.database_dir, args.train_dir, args.valid_dir, args.test_dir)
         train_set = l2l.data.MetaDataset(datasets['train'])
@@ -188,31 +154,51 @@ def main():
                 l2l.data.transforms.LoadData(train_set),
                 l2l.data.transforms.RemapLabels(train_set),
                 l2l.data.transforms.ConsecutiveLabels(train_set),
-            ]
+            ],
+            num_tasks=1000,
         )
-        for epoch in range(num_epochs):
-            model.train()
-
-            loss_ctr = 0
-            epoch_loss = 0.0
-            epoch_acc = 0.0
-
+        meta_model = l2l.algorithms.MAML(model, lr=maml_lr)
+        opt = torch.optim.Adam(meta_model.parameters(), lr=args.learning_rate)
+        criterion
+        for iteration in range(iterations):
+            iteration_error = 0.0
+            iteration_acc = 0.0
             for _ in range(tps):
-                batch = train_tasks.sample()
+                learner = meta_model.clone()
+                train_task = train_tasks.sample()
+                data, labels = train_task
+                data = data.to(device)
+                labels = labels.to(device)
 
-                loss, acc = fast_adapt(model, batch, criterion)
+                # Separate data into adaptation/evalutation sets
+                adaptation_indices = np.zeros(data.size(0), dtype=bool)
+                adaptation_indices[np.arange(args.K_shot*args.N_way) * 2] = True
+                evaluation_indices = torch.from_numpy(~adaptation_indices)
+                adaptation_indices = torch.from_numpy(adaptation_indices)
+                adaptation_data, adaptation_labels = data[adaptation_indices], labels[adaptation_indices]
+                evaluation_data, evaluation_labels = data[evaluation_indices], labels[evaluation_indices]
 
-                loss_ctr += 1
-                epoch_loss += loss.item()
-                epoch_acc += acc
+                # Fast Adaptation
+                for step in range(fas):
+                    train_error = criterion(learner(adaptation_data), adaptation_labels)
+                    learner.adapt(train_error)
 
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+                # Compute validation loss
+                predictions = learner(evaluation_data)
+                valid_error = criterion(predictions, evaluation_labels)
+                valid_error /= len(evaluation_data)
+                valid_accuracy = meta_accuracy(predictions, evaluation_labels)
+                iteration_error += valid_error
+                iteration_acc += valid_accuracy
 
-            scheduler.step(loss)
-            print('Epoch {}, train, loss={:.4f} acc={:.4f}'.format(
-                epoch, epoch_loss/loss_ctr, epoch_acc/loss_ctr))
+            iteration_error /= tps
+            iteration_acc /= tps
+            print('Loss : {:.3f} Acc : {:.3f}'.format(iteration_error.item(), iteration_acc))
+
+            # Take the meta-learning step
+            opt.zero_grad()
+            iteration_error.backward()
+            opt.step()
 
         os._exit(0)
 
@@ -291,8 +277,38 @@ def test(model, dataloader, epoch, is_graph=False):
     return EER
 
 
-def train(model, dataset, criterion, num_tasks=1000, maml_lr=0.01, iterations=1000, tps=8, fas=5):
-    pass
+def train(model, optimizer, epoch, dataloader, criterion, metric):
+    with torch.set_grad_enabled(True):
+        losses = AverageMeter()
+        top1 = AverageMeter()
+        model.train()
+
+        for batch_idx, (data, target, _) in enumerate(dataloader):
+            optimizer.zero_grad()
+            target = target.cuda(non_blocking=True)
+            outputs = model(data.cuda())
+            if metric is not None:
+                outputs = metric(outputs, target)
+            loss = criterion(outputs, target)
+            # print(loss.item())
+            if torch.isnan(loss):
+                print("there is nan!!!!")
+                print(loss)
+                print(model(data.cuda()))
+                print(outputs)
+                # for name, param in model.named_parameters():
+                #     print(name, param.grad.norm())
+                os._exit(1)
+
+            prec1, prec5 = accuracy(outputs, target, topk=(1, 5))
+            losses.update(loss.item(), data.size(0))
+            top1.update(prec1[0], data.size(0))
+            loss.backward()
+            optimizer.step()
+            if batch_idx % 25 == 0:
+                print('Step-{} Prec@1 {top1.avg:.5f} loss@1 - {loss.avg:.5f}'.format(batch_idx, top1=top1, loss=losses))
+
+        print('*TRAIN Prec@1 {top1.avg:.5f} - loss@1 {loss.avg:.5f}'.format(top1=top1, loss=losses))
 
 def validate(model, optimizer, epoch, dataloader, criterion, metric):
     global best_losss

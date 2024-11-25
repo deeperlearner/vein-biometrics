@@ -197,7 +197,6 @@ if __name__ == '__main__':
                                              transforms.ToTensor(),
                                              normalize]))
     dataset[0]
-    dataset[1]
     # data_loaders = get_dataloader(database_dir, train_dir, valid_dir, test_dir, batch_size, num_workers)
     
     # data_all = torch.Tensor()
