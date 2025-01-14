@@ -209,13 +209,58 @@ def rgb_to_grayscale(img, num_output_channels: int = 1):
     return l_img
 
 
+class PalmCNN(nn.Module):
+    def __init__(self, embedding_size, bn_momentum: float = 0.1, dropout: float = 0.2):
+        super(PalmCNN, self).__init__()
+        self.model = nn.Sequential(
+            nn.Conv2d(1, 32, 16, stride=4),
+            nn.BatchNorm2d(32, momentum=bn_momentum),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv2d(32, 64, 7, stride=2),
+            nn.BatchNorm2d(64, momentum=bn_momentum),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv2d(64, 128, 3, stride=1),
+            nn.BatchNorm2d(128, momentum=bn_momentum),
+            nn.LeakyReLU(inplace=True),
+        )
+        self.classifier = nn.Sequential(
+            nn.Dropout(p=dropout, inplace=True),
+            nn.Linear(128, 256),
+            nn.Tanh(),
+            nn.Linear(256, 128),
+        )
+
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Linear):
+                nn.init.kaiming_uniform_(m.weight, mode="fan_out", nonlinearity="sigmoid")
+                nn.init.zeros_(m.bias)
+
+    def forward(self, x, train=True):
+        x = rgb_to_grayscale(x)
+        x = self.model(x)
+        x = x.mean([2, 3])
+        x = self.classifier(x)
+        return x
+
+
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
 if __name__ == '__main__':
     model = MNASNet_Modified(512)
-    print(model.model)
-    print(model.model.layers)
+    # print(model.model)
+    # print(model.model.layers)
     # c = count_parameters(model)
     # print(c)
+    model = PalmCNN(512)
+    x = torch.rand(8, 3, 128, 128)
+    out = model(x)
+    print(out)

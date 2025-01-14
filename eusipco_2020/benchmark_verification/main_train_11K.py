@@ -7,6 +7,8 @@ It considers CUSTOM PENALTY functions.
 The related databases should be placed in data_bosphorus, data_polyup, and data_sdumla folders
 
 """
+import logging
+import sys
 import argparse
 import shutil
 import os
@@ -19,13 +21,18 @@ import numpy as np
 import torch
 from torch.optim import lr_scheduler
 from torch.nn import CrossEntropyLoss
+from torchvision import transforms
+from torch.utils.tensorboard import SummaryWriter
+from torchvision.utils import save_image, make_grid
 from prettytable import PrettyTable
 from tqdm import tqdm
+import PIL.Image
 
 from utils import FullPairComparer, AverageMeter, evaluate, plot_roc, plot_DET_with_EER, plot_density, accuracy
 from models import MNASNet_Modified as net
-from benchmark_verification import get_dataloader
+from benchmark_verification.hands_loader import get_dataloader
 from losses import *
+
 
 parser = argparse.ArgumentParser(description='Vein Verification')
 
@@ -49,7 +56,7 @@ parser.add_argument('--scale-rate', default=32, type=float, metavar='SC',
                     help='scale rate (default: 0.001)')
 parser.add_argument('--margin', default=0.5, type=float, metavar='MG',
                     help='margin')
-parser.add_argument('--database-dir', default='Contactless_Knuckle_Palm_Print_and_Vein_Dataset', type=str,
+parser.add_argument('--database-dir', default='/media/back/home/chuck/11K_Hands_processed', type=str,
                     help='path to the database root directory')
 parser.add_argument('--train-dir', default='Contactless_Knuckle_Palm_Print_and_Vein_Dataset/CSVFiles/train_dis.csv', type=str,
                     help='path to train root dir')
@@ -61,7 +68,7 @@ parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                     help='evaluate model on test set')
 parser.add_argument('--type', default='aamp', type=str, metavar='MG',
                     help='type')
-parser.add_argument('--outdir', default='model/', type=str,
+parser.add_argument('--outdir', default='model_11K/', type=str,
                     help='Out Directory')
 parser.add_argument('--logdir', default='logs.csv', type=str,
                     help='path to log dir')
@@ -73,6 +80,17 @@ best_losss = 100
 global best_test
 best_test = 100
 
+log_root = logging.getLogger()
+log_root.setLevel(logging.INFO)
+formatter = logging.Formatter("%(asctime)s-%(message)s")
+handler_file = logging.FileHandler(os.path.join(args.outdir, "training.log"))
+handler_stream = logging.StreamHandler(sys.stdout)
+handler_file.setFormatter(formatter)
+handler_stream.setFormatter(formatter)
+log_root.addHandler(handler_file)
+log_root.addHandler(handler_stream)
+
+summary_writer = SummaryWriter(log_dir=os.path.join(args.outdir, "tensorboard"))
 
 def main():
     if not os.path.exists(args.outdir):
@@ -119,37 +137,39 @@ def main():
         args.start_epoch = checkpoint['epoch']
         model.load_state_dict(checkpoint['state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer'])
+
     if args.evaluate:
         checkpoint = torch.load(args.outdir + '/model_best.pth.tar')
         args.start_epoch = checkpoint['epoch']
         model.load_state_dict(checkpoint['state_dict'], strict=False)
         optimizer.load_state_dict(checkpoint['optimizer'])
-        data_loaders = get_dataloader(args.database_dir, args.train_dir, args.valid_dir, args.test_dir,
-                                      args.batch_size, args.num_workers)
-        test(model, data_loaders['test'], '00', is_graph=True)
-
+        # data_loaders = get_dataloader(args.database_dir, args.train_dir, args.valid_dir, args.test_dir,
+        #                               args.batch_size, args.num_workers)
+        # test(model, data_loaders['test'], '00', is_graph=True)
     else:
+        data_loaders = get_dataloader(args.database_dir, batch_size=args.batch_size)
+
         for epoch in range(args.start_epoch, args.num_epochs + args.start_epoch):
             print(80 * '=')
             print('Epoch [{}/{}]'.format(epoch, args.num_epochs + args.start_epoch - 1))
 
-            data_loaders = get_dataloader(args.database_dir, args.train_dir, args.valid_dir, args.test_dir,
-                                          args.batch_size, args.num_workers)
 
-            train(model, optimizer, epoch, data_loaders['train'], criterion, loss_metric)
-            is_best, acc, loss = validate(model, optimizer, epoch, data_loaders['valid'], criterion, loss_metric)
+            train(model, optimizer, epoch, data_loaders["train"], criterion, loss_metric)
+            is_best, acc, loss = validate(model, optimizer, epoch, data_loaders["valid"], criterion, loss_metric)
             scheduler.step(loss)
+            lr = scheduler._last_lr[0]
+            # if lr < 1E-5:
+            #     break
             if is_best and acc > 100:
-                test(model, data_loaders['test'], epoch, is_graph=True)
+                test(model, data_loaders["test"], epoch, is_graph=True)
 
+        # epoch = 99
         print(80 * '=')
 
         ## MODEL EVALUATION LOGGING ##
-        data_loaders = get_dataloader(args.database_dir, args.train_dir, args.valid_dir, args.test_dir,
-                                      args.batch_size, args.num_workers)
         checkpoint = torch.load(args.outdir + '/model_best.pth.tar')
         model.load_state_dict(checkpoint['state_dict'])
-        EER = test(model, data_loaders['test'], epoch, is_graph=True)
+        EER = test(model, data_loaders["test"], epoch, is_graph=True)
 
         header = ['weight_decay', 'learning_rate', 'scale', 'margin', 'type', 'batch_size', 'embedding_size', 'EER', 'out_dir']
         info = [args.weight_decay, args.learning_rate, args.scale_rate, args.margin, args.type, args.batch_size, args.embedding_size, EER, args.outdir]
@@ -168,21 +188,52 @@ def main():
 def test(model, dataloader, epoch, is_graph=False):
     global best_test
     labels, distances = [], []
+    im_size = (128, 128)
+    trans = transforms.Compose([transforms.Resize(im_size),
+                                transforms.ToTensor()])
     with torch.set_grad_enabled(False):
         comparer = FullPairComparer().cuda()
         model.eval()
-        for batch_idx, (data1, data2, target) in enumerate(dataloader):
-            dist = []
+        for batch_idx, (data1, data2, target, im_file1, im_file2) in enumerate(tqdm(dataloader)):
             target = target.cuda(non_blocking=True)
 
             output1 = model(data1, False)
             output2 = model(data2, False)
             dist = comparer(output1, output2) #TODO: sign - torch.sign()
+            # print(target[:4])
+            # print(dist[:4])
+            indices = torch.where((target == 1) & (dist < 0.3))[0]
+            if len(indices):
+                files1 = [im_file1[i] for i in indices.tolist()]
+                im1s = []
+                for f in files1:
+                    im1 = PIL.Image.open(f).convert('RGB')
+                    im1 = trans(im1)
+                    im1s.append(im1)
+                    if len(im1s) == 8:
+                        break
+                im1s = torch.stack(im1s)
+                summary_writer.add_image("genuine1", im1s, batch_idx, dataformats='NCHW')
+
+                files2 = [im_file2[i] for i in indices.tolist()]
+                im2s = []
+                for f in files2:
+                    im2 = PIL.Image.open(f).convert('RGB')
+                    im2 = trans(im2)
+                    im2s.append(im2)
+                    if len(im2s) == 8:
+                        break
+                im2s = torch.stack(im2s)
+                summary_writer.add_image("genuine2", im2s, batch_idx, dataformats='NCHW')
+                # genuine_data1 = data1[indices]
+                # genuine_data2 = data2[indices]
+                # summary_writer.add_image("high dist genuine1", make_grid(genuine_data1, nrow=8), batch_idx)
+                # summary_writer.add_image("high dist genuine2", make_grid(genuine_data2, nrow=8), batch_idx)
             #dist = comparer(torch.sign(F.relu(output1)), torch.sign(F.relu(output2)))  # TODO: sign - torch.sign()
             distances.append(dist.data.cpu().numpy())
             labels.append(target.data.cpu().numpy())
-            if batch_idx % 50 == 0:
-                print('Batch-Index -{}'.format(str(batch_idx)))
+            # if batch_idx % 50 == 0:
+            #     print('Batch-Index -{}'.format(str(batch_idx)))
 
     labels = np.array([sublabel for label in labels for sublabel in label])
     distances = np.array([subdist for dist in distances for subdist in dist])
@@ -199,6 +250,7 @@ def test(model, dataloader, epoch, is_graph=False):
 
     if is_best and is_graph:
         plot_roc(fpr, tpr, figure_name=args.outdir + '/Test_ROC-{}.png'.format(epoch))
+
         #######################################################################
         x_labels = [10 ** -6, 10 ** -5, 10 ** -4, 10 ** -3, 10 ** -2, 10 ** -1]
         tpr_fpr_table = PrettyTable(['Methods'] + [str(x) for x in x_labels])
@@ -212,6 +264,7 @@ def test(model, dataloader, epoch, is_graph=False):
         tpr_fpr_table.add_row(tpr_fpr_row)
         print(tpr_fpr_table)
         #######################################################################
+
         plot_DET_with_EER(fpr, fnr, fpr_optimum, fnr_optimum,
                           figure_name=args.outdir + '/Test_DET-{}.png'.format(epoch))
         plot_density(distances, labels, figure_name=args.outdir + '/Test_DENSITY-{}.png'.format(epoch))
@@ -230,22 +283,22 @@ def train(model, optimizer, epoch, dataloader, criterion, metric):
         top1 = AverageMeter()
         model.train()
 
-        for batch_idx, (data, target) in enumerate(dataloader):
+        for batch_idx, (data, target, _) in enumerate(dataloader):
             optimizer.zero_grad()
-            target = target.cuda(non_blocking=True)
+            target = target.cuda()
             outputs = model(data.cuda())
             if metric is not None:
                 outputs = metric(outputs, target)
             loss = criterion(outputs, target)
             # print(loss.item())
-            if torch.isnan(loss):
-                print("there is nan!!!!")
-                print(loss)
-                print(model(data.cuda()))
-                print(outputs)
-                # for name, param in model.named_parameters():
-                #     print(name, param.grad.norm())
-                os._exit(1)
+            # if torch.isnan(loss):
+            #     print("there is nan!!!!")
+            #     print(loss)
+            #     print(model(data.cuda()))
+            #     print(outputs)
+            #     # for name, param in model.named_parameters():
+            #     #     print(name, param.grad.norm())
+            #     os._exit(1)
 
             prec1, prec5 = accuracy(outputs, target, topk=(1, 5))
             losses.update(loss.item(), data.size(0))
@@ -255,7 +308,9 @@ def train(model, optimizer, epoch, dataloader, criterion, metric):
             if batch_idx % 25 == 0:
                 print('Step-{} Prec@1 {top1.avg:.5f} loss@1 - {loss.avg:.5f}'.format(batch_idx, top1=top1, loss=losses))
 
-        print('*TRAIN Prec@1 {top1.avg:.5f} - loss@1 {loss.avg:.5f}'.format(top1=top1, loss=losses))
+        logging.info('*TRAIN* Epoch {epoch}: Prec@1 {top1.avg:.5f} - loss@1 {loss.avg:.5f}'.format(epoch=epoch, top1=top1, loss=losses))
+        summary_writer.add_scalar("Train accuracy", top1.avg, global_step=epoch, )
+        summary_writer.add_scalar("Train loss", losses.avg, global_step=epoch, )
 
 def validate(model, optimizer, epoch, dataloader, criterion, metric):
     global best_losss
@@ -265,7 +320,7 @@ def validate(model, optimizer, epoch, dataloader, criterion, metric):
 
         model.eval()
 
-        for batch_idx, (data, target) in enumerate(dataloader):
+        for batch_idx, (data, target, _) in enumerate(dataloader):
             target = target.cuda(non_blocking=True)
             outputs = model(data.cuda())
             if metric is not None:
@@ -277,7 +332,10 @@ def validate(model, optimizer, epoch, dataloader, criterion, metric):
             if batch_idx % 5 == 0:
                 print('Step-{} Prec@1 {top1.avg:.5f} loss@1 - {loss.avg:.5f}'.format(batch_idx, top1=top1, loss=losses))
 
-        print('*VALID Prec@1 {top1.avg:.5f} - loss@1 {loss.avg:.5f}'.format(top1=top1, loss=losses))
+        logging.info('*VALID* Epoch {epoch}: Prec@1 {top1.avg:.5f} - loss@1 {loss.avg:.5f}'.format(epoch=epoch, top1=top1, loss=losses))
+        summary_writer.add_scalar("Valid accuracy", top1.avg, global_step=epoch, )
+        summary_writer.add_scalar("Valid loss", losses.avg, global_step=epoch, )
+
         is_best = losses.avg <= best_losss
         best_losss = min(losses.avg, best_losss)
         torch.save({'epoch': epoch+1,

@@ -32,7 +32,7 @@ def evaluate(distances, labels, best_threshold=None):
     fpr, tpr, thresholds = metrics.roc_curve(labels, distances, pos_label=0, drop_intermediate=True)
     fpr_optimum, fnr_optimum = _calculate_eer(fpr, (1 - tpr))
     accuracy, best_threshold = _calculate_mean_acc_dist(thresholds, distances, labels, best_threshold)
-    return tpr, fpr, (1-tpr), fpr_optimum, fnr_optimum, accuracy, best_threshold
+    return tpr, fpr, (1-tpr), fpr_optimum, fnr_optimum, accuracy, best_threshold, thresholds
 
 
 def _calculate_mean_acc_dist(thresholds, distances, labels, best_threshold):

@@ -22,7 +22,8 @@ from torch.nn import CrossEntropyLoss
 import learn2learn as l2l
 
 from utils import FullPairComparer, AverageMeter, evaluate, plot_roc, plot_DET_with_EER, plot_density, accuracy
-from models import MNASNet_Modified as net
+# from models import MNASNet_Modified as net
+from models import PalmCNN as net
 from benchmark_verification import get_dataset, get_dataloader
 from losses import *
 
@@ -53,9 +54,9 @@ parser.add_argument('--margin', default=0.5, type=float, metavar='MG',
                     help='margin')
 parser.add_argument('--database-dir', default='Contactless_Knuckle_Palm_Print_and_Vein_Dataset', type=str,
                     help='path to the database root directory')
-parser.add_argument('--train-dir', default='Contactless_Knuckle_Palm_Print_and_Vein_Dataset/CSVFiles/train_dis.csv', type=str,
+parser.add_argument('--train-dir', default='Contactless_Knuckle_Palm_Print_and_Vein_Dataset/CSVFiles_v1/train_dis.csv', type=str,
                     help='path to train root dir')
-parser.add_argument('--valid-dir', default='Contactless_Knuckle_Palm_Print_and_Vein_Dataset/CSVFiles/val_dis.csv', type=str,
+parser.add_argument('--valid-dir', default='Contactless_Knuckle_Palm_Print_and_Vein_Dataset/CSVFiles_v1/val_dis.csv', type=str,
                     help='path to valid root dir')
 parser.add_argument('--test-dir', default='Contactless_Knuckle_Palm_Print_and_Vein_Dataset/CSVFiles/test_pairs_dis.csv', type=str,
                     help='path to test root dir')
@@ -63,7 +64,7 @@ parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                     help='evaluate model on test set')
 parser.add_argument('--type', default='aamp', type=str, metavar='MG',
                     help='type')
-parser.add_argument('--outdir', default='model/', type=str,
+parser.add_argument('--outdir', default='palm_model/', type=str,
                     help='Out Directory')
 parser.add_argument('--logdir', default='logs.csv', type=str,
                     help='path to log dir')
@@ -80,7 +81,35 @@ def meta_accuracy(predictions, targets):
     predictions = predictions.argmax(dim=1)
     acc = (predictions == targets).sum().float()
     acc /= len(targets)
-    return acc.item()
+    return acc
+
+
+def fast_adapt(batch, learner, criterion, fas):
+    ways, shots = args.N_way, args.K_shot
+
+    data, labels = batch
+    data = data.to(device)
+    labels = labels.to(device)
+
+    # Separate data into adaptation/evalutation sets
+    adaptation_indices = np.zeros(data.size(0), dtype=bool)
+    adaptation_indices[np.arange(shots*ways) * 2] = True
+    evaluation_indices = torch.from_numpy(~adaptation_indices)
+    adaptation_indices = torch.from_numpy(adaptation_indices)
+    adaptation_data, adaptation_labels = data[adaptation_indices], labels[adaptation_indices]
+    evaluation_data, evaluation_labels = data[evaluation_indices], labels[evaluation_indices]
+
+    # Adapt the model
+    for step in range(fas):
+        adaption_error = criterion(learner(adaptation_data), adaptation_labels)
+        learner.adapt(adaption_error)
+
+    # Evaluate the adapted model
+    predictions = learner(evaluation_data)
+    evaluation_error = criterion(predictions, evaluation_labels)
+    evaluation_error /= len(evaluation_data)
+    evaluation_accuracy = meta_accuracy(predictions, evaluation_labels)
+    return evaluation_error, evaluation_accuracy
 
 
 def main():
@@ -104,7 +133,8 @@ def main():
         loss_metric = None
 
     if loss_metric is not None:
-        model = net(embedding_size=args.embedding_size, class_size=args.num_classes, only_embeddings=True, pretrained=True)
+        # model = net(embedding_size=args.embedding_size, class_size=args.num_classes, only_embeddings=True, pretrained=True)
+        model = net(embedding_size=args.embedding_size)
         to_be_optimized = chain(model.parameters(), loss_metric.parameters())
     else:
         model = net(embedding_size=args.embedding_size, class_size=args.num_classes, only_embeddings=False, pretrained=True)
@@ -141,7 +171,7 @@ def main():
         # meta learning hyper-parameters
         maml_lr = 0.01
         iterations = 1000
-        tps = 8
+        tps = 32
         fas = 5
 
         datasets = get_dataset(args.database_dir, args.train_dir, args.valid_dir, args.test_dir)
@@ -154,59 +184,43 @@ def main():
                 l2l.data.transforms.LoadData(train_set),
                 l2l.data.transforms.RemapLabels(train_set),
                 l2l.data.transforms.ConsecutiveLabels(train_set),
-            ],
-            num_tasks=1000,
+            ]
         )
         meta_model = l2l.algorithms.MAML(model, lr=maml_lr)
-        opt = torch.optim.Adam(meta_model.parameters(), lr=args.learning_rate)
+        # opt = torch.optim.Adam(meta_model.parameters(), lr=args.learning_rate)
+        opt = torch.optim.SGD(meta_model.parameters(),
+                              lr=args.learning_rate,
+                              momentum=0.9,
+                              weight_decay=args.weight_decay)
         criterion
         for iteration in range(iterations):
             iteration_error = 0.0
             iteration_acc = 0.0
             for _ in range(tps):
                 learner = meta_model.clone()
-                train_task = train_tasks.sample()
-                data, labels = train_task
-                data = data.to(device)
-                labels = labels.to(device)
+                batch = train_tasks.sample()
 
-                # Separate data into adaptation/evalutation sets
-                adaptation_indices = np.zeros(data.size(0), dtype=bool)
-                adaptation_indices[np.arange(args.K_shot*args.N_way) * 2] = True
-                evaluation_indices = torch.from_numpy(~adaptation_indices)
-                adaptation_indices = torch.from_numpy(adaptation_indices)
-                adaptation_data, adaptation_labels = data[adaptation_indices], labels[adaptation_indices]
-                evaluation_data, evaluation_labels = data[evaluation_indices], labels[evaluation_indices]
-
-                # Fast Adaptation
-                for step in range(fas):
-                    train_error = criterion(learner(adaptation_data), adaptation_labels)
-                    learner.adapt(train_error)
-
-                # Compute validation loss
-                predictions = learner(evaluation_data)
-                valid_error = criterion(predictions, evaluation_labels)
-                valid_error /= len(evaluation_data)
-                valid_accuracy = meta_accuracy(predictions, evaluation_labels)
-                iteration_error += valid_error
-                iteration_acc += valid_accuracy
+                evaluation_error, evaluation_accuracy = fast_adapt(batch,
+                                                                   learner,
+                                                                   criterion,
+                                                                   fas)
+                iteration_error += evaluation_error
+                iteration_acc += evaluation_accuracy
 
             iteration_error /= tps
             iteration_acc /= tps
-            print('Loss : {:.3f} Acc : {:.3f}'.format(iteration_error.item(), iteration_acc))
+            print('Iteration {}, Loss : {:.3f} Acc : {:.3f}'.format(iteration, iteration_error.item(), iteration_acc.item()))
 
             # Take the meta-learning step
             opt.zero_grad()
             iteration_error.backward()
             opt.step()
 
-        os._exit(0)
-
-        train(model, optimizer, epoch, train_loader, criterion, loss_metric)
-        is_best, acc, loss = validate(model, optimizer, epoch, data_loaders['valid'], criterion, loss_metric)
-        scheduler.step(loss)
-        if is_best and acc > 100:
-            test(model, data_loaders['test'], epoch, is_graph=True)
+        torch.save({'epoch': iteration+1,
+                    'state_dict': meta_model.state_dict(),
+                    'optimizer': opt.state_dict()},
+                   args.outdir + '/model_checkpoint.pth.tar')
+        shutil.copyfile(args.outdir + '/model_checkpoint.pth.tar', args.outdir + '/model_best.pth.tar')
 
         print(80 * '=')
 
@@ -214,8 +228,8 @@ def main():
         data_loaders = get_dataloader(args.database_dir, args.train_dir, args.valid_dir, args.test_dir,
                                       args.batch_size, args.num_workers)
         checkpoint = torch.load(args.outdir + '/model_best.pth.tar')
-        model.load_state_dict(checkpoint['state_dict'])
-        EER = test(model, data_loaders['test'], epoch, is_graph=True)
+        meta_model.load_state_dict(checkpoint['state_dict'])
+        EER = test(meta_model, data_loaders['test'], iteration, is_graph=True)
 
         header = ['weight_decay', 'learning_rate', 'scale', 'margin', 'type', 'batch_size', 'embedding_size', 'EER', 'out_dir']
         info = [args.weight_decay, args.learning_rate, args.scale_rate, args.margin, args.type, args.batch_size, args.embedding_size, EER, args.outdir]
@@ -275,72 +289,6 @@ def test(model, dataloader, epoch, is_graph=False):
             shutil.copyfile(args.outdir + '/model_best.pth.tar', args.outdir + '/test_model_best.pth.tar')
 
     return EER
-
-
-def train(model, optimizer, epoch, dataloader, criterion, metric):
-    with torch.set_grad_enabled(True):
-        losses = AverageMeter()
-        top1 = AverageMeter()
-        model.train()
-
-        for batch_idx, (data, target, _) in enumerate(dataloader):
-            optimizer.zero_grad()
-            target = target.cuda(non_blocking=True)
-            outputs = model(data.cuda())
-            if metric is not None:
-                outputs = metric(outputs, target)
-            loss = criterion(outputs, target)
-            # print(loss.item())
-            if torch.isnan(loss):
-                print("there is nan!!!!")
-                print(loss)
-                print(model(data.cuda()))
-                print(outputs)
-                # for name, param in model.named_parameters():
-                #     print(name, param.grad.norm())
-                os._exit(1)
-
-            prec1, prec5 = accuracy(outputs, target, topk=(1, 5))
-            losses.update(loss.item(), data.size(0))
-            top1.update(prec1[0], data.size(0))
-            loss.backward()
-            optimizer.step()
-            if batch_idx % 25 == 0:
-                print('Step-{} Prec@1 {top1.avg:.5f} loss@1 - {loss.avg:.5f}'.format(batch_idx, top1=top1, loss=losses))
-
-        print('*TRAIN Prec@1 {top1.avg:.5f} - loss@1 {loss.avg:.5f}'.format(top1=top1, loss=losses))
-
-def validate(model, optimizer, epoch, dataloader, criterion, metric):
-    global best_losss
-    with torch.set_grad_enabled(False):
-        losses = AverageMeter()
-        top1 = AverageMeter()
-
-        model.eval()
-
-        for batch_idx, (data, target, _) in enumerate(dataloader):
-            target = target.cuda(non_blocking=True)
-            outputs = model(data.cuda())
-            if metric is not None:
-                outputs = metric(outputs, target)
-            loss = criterion(outputs, target)
-            prec1, prec5 = accuracy(outputs, target, topk=(1, 5))
-            losses.update(loss.item(), data.size(0))
-            top1.update(prec1[0], data.size(0))
-            if batch_idx % 5 == 0:
-                print('Step-{} Prec@1 {top1.avg:.5f} loss@1 - {loss.avg:.5f}'.format(batch_idx, top1=top1, loss=losses))
-
-        print('*VALID Prec@1 {top1.avg:.5f} - loss@1 {loss.avg:.5f}'.format(top1=top1, loss=losses))
-        is_best = losses.avg <= best_losss
-        best_losss = min(losses.avg, best_losss)
-        torch.save({'epoch': epoch+1,
-                    'state_dict': model.state_dict(),
-                    'optimizer': optimizer.state_dict()},
-                   args.outdir+'/model_checkpoint.pth.tar')
-        if is_best:
-            shutil.copyfile(args.outdir+'/model_checkpoint.pth.tar', args.outdir+'/model_best.pth.tar')
-
-        return is_best, top1.avg, losses.avg
 
 
 if __name__ == '__main__':
