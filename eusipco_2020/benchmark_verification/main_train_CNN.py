@@ -123,7 +123,7 @@ def main():
         checkpoint = torch.load(args.outdir + '/model_best.pth.tar')
         args.start_epoch = checkpoint['epoch']
         model.load_state_dict(checkpoint['state_dict'], strict=False)
-        optimizer.load_state_dict(checkpoint['optimizer'])
+        # optimizer.load_state_dict(checkpoint['optimizer'])
         data_loaders = get_dataloader(args.database_dir, args.train_dir, args.valid_dir, args.test_dir,
                                       args.batch_size, args.num_workers)
         test(model, data_loaders['test'], '00', is_graph=True)

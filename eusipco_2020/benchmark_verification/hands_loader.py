@@ -21,6 +21,11 @@ class DataReader(Dataset):
         self.df = pd.read_csv(handsinfo_path)
         self.df = self.df[self.df['aspectOfHand'].str.contains("palmar")]
         self.df = self.df.reset_index(drop=True)
+        for index, row in self.df.iterrows():
+            if "left" in row["aspectOfHand"]:
+                self.df.at[index, "id"] = str(row["id"]) + "_L"
+            if "right" in row["aspectOfHand"]:
+                self.df.at[index, "id"] = str(row["id"]) + "_R"
 
     def make_split(self):
         base_path = os.path.dirname(self.hands_path)

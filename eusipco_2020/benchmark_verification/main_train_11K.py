@@ -40,7 +40,7 @@ parser.add_argument('--start-epoch', default=0, type=int, metavar='SE',
                     help='start epoch (default: 0)')
 parser.add_argument('--num-epochs', default=1, type=int, metavar='NE',
                     help='number of epochs to train (default: 90)')
-parser.add_argument('--num-classes', default=200, type=int, metavar='NC',
+parser.add_argument('--num-classes', default=400, type=int, metavar='NC',
                     help='number of clases (default: 318)')
 parser.add_argument('--embedding-size', default=512, type=int, metavar='ES',
                     help='embedding size (default: 128)')
@@ -202,7 +202,8 @@ def test(model, dataloader, epoch, is_graph=False):
             dist = comparer(output1, output2) #TODO: sign - torch.sign()
             # print(target[:4])
             # print(dist[:4])
-            indices = torch.where((target == 1) & (dist < 0.3))[0]
+            # indices = torch.where((target == 1) & (dist < 0.3))[0] # low dist genuine
+            indices = torch.where((target == 1) & (dist > 0.5))[0] # high dist genuine
             if len(indices):
                 files1 = [im_file1[i] for i in indices.tolist()]
                 im1s = []
