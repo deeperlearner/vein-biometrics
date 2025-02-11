@@ -75,24 +75,47 @@ class DataReader(Dataset):
 
 
 class SingleReader(Dataset):
-    def __init__(self, hands_path, csv_path, transform=None):
+    def __init__(self, hands_path, csv_path, transform=None, rotateROI=False, HorizontalFlip=False):
         self.hands_path = Path(hands_path)
         self.transform = transform
         self.df = pd.read_csv(csv_path)
+        self.rotateROI = rotateROI
+        self.HorizontalFlip = HorizontalFlip
 
     def __getitem__(self, index):
-        im_file = self.df['imageName'][index]
-        img = self.im_reader(self.hands_path.joinpath(im_file))
-        classname = int(self.df['id'][index])
+        if self.rotateROI:
+            idx = index % len(self.df)
+            im_file = self.df['imageName'][idx]
+            img = self.im_reader(self.hands_path.joinpath(im_file), degree=90 * (index//len(self.df)))
+            classname = int(self.df['id'][idx]) * (index//len(self.df) + 1)
+        elif self.HorizontalFlip:
+            idx = index % len(self.df)
+            im_file = self.df['imageName'][idx]
+            img = self.im_reader(self.hands_path.joinpath(im_file), degree=180 * (index//len(self.df)))
+            classname = int(self.df['id'][idx]) * (index//len(self.df) + 1)
+        else:
+            im_file = self.df['imageName'][index]
+            img = self.im_reader(self.hands_path.joinpath(im_file))
+            classname = int(self.df['id'][index])
         return img, classname, im_file
 
-    def im_reader(self, im_file):
+    def im_reader(self, im_file, degree=0):
         im = PIL.Image.open(im_file)
         im = im.convert('RGB')
+        if self.rotateROI:
+            im = im.rotate(degree)
+        elif self.HorizontalFlip:
+            if degree==180:
+                im = im.transpose(PIL.Image.FLIP_LEFT_RIGHT)
         return self.transform(im)
 
     def __len__(self):
-        return len(self.df)
+        if self.rotateROI:
+            return len(self.df) * 4
+        elif self.HorizontalFlip:
+            return len(self.df) * 2
+        else:
+            return len(self.df)
 
 
 class PairReader(Dataset):
@@ -150,6 +173,7 @@ def get_dataloader(database_dir, batch_size=32, num_workers=8):
 
     train_dataset = SingleReader(Hands_path, train_csv, transforms.Compose([transforms.Resize(im_size),
                                                                             # transforms.ColorJitter(brightness=0.5),
+                                                                            # transforms.RandomAffine(5, translate=(0.05, 0.05)),
                                                                             transforms.ToTensor(),
                                                                             normalize]))
     valid_dataset = SingleReader(Hands_path, valid_csv, transforms.Compose([transforms.Resize(im_size),
@@ -167,7 +191,7 @@ def get_dataloader(database_dir, batch_size=32, num_workers=8):
 
 
 if __name__ == '__main__':
-    database_dir = "/media/back/home/chuck/11K_Hands_processed"
+    database_dir = "/media/back/home/chuck/Dataset/11K_Hands_processed"
     Hands_path = os.path.join(database_dir, "Hands_crop/")
     HandInfo_path = os.path.join(database_dir, "HandInfo.txt")
     im_size = (128, 128)

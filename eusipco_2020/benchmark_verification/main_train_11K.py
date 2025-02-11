@@ -56,7 +56,7 @@ parser.add_argument('--scale-rate', default=32, type=float, metavar='SC',
                     help='scale rate (default: 0.001)')
 parser.add_argument('--margin', default=0.5, type=float, metavar='MG',
                     help='margin')
-parser.add_argument('--database-dir', default='/media/back/home/chuck/11K_Hands_processed', type=str,
+parser.add_argument('--database-dir', default='/media/back/home/chuck/Dataset/11K_Hands_processed', type=str,
                     help='path to the database root directory')
 parser.add_argument('--train-dir', default='Contactless_Knuckle_Palm_Print_and_Vein_Dataset/CSVFiles/train_dis.csv', type=str,
                     help='path to train root dir')
@@ -291,6 +291,7 @@ def train(model, optimizer, epoch, dataloader, criterion, metric):
             if metric is not None:
                 outputs = metric(outputs, target)
             loss = criterion(outputs, target)
+            # summary_writer.add_image("train_data", data, batch_idx, dataformats='NCHW')
             # print(loss.item())
             # if torch.isnan(loss):
             #     print("there is nan!!!!")
@@ -309,6 +310,7 @@ def train(model, optimizer, epoch, dataloader, criterion, metric):
             if batch_idx % 25 == 0:
                 print('Step-{} Prec@1 {top1.avg:.5f} loss@1 - {loss.avg:.5f}'.format(batch_idx, top1=top1, loss=losses))
 
+        # os._exit(0)
         logging.info('*TRAIN* Epoch {epoch}: Prec@1 {top1.avg:.5f} - loss@1 {loss.avg:.5f}'.format(epoch=epoch, top1=top1, loss=losses))
         summary_writer.add_scalar("Train accuracy", top1.avg, global_step=epoch, )
         summary_writer.add_scalar("Train loss", losses.avg, global_step=epoch, )
