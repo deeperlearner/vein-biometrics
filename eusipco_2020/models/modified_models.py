@@ -171,7 +171,7 @@ class MNASNet_Modified(nn.Module):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
 
-    def forward(self, x, train=True):
+    def forward(self, x, train=False):
         x = rgb_to_grayscale(x, num_output_channels=3)
         out = self.model.layers(x)
         out = out.mean([2, 3])

@@ -15,6 +15,7 @@ import os
 from itertools import chain
 import csv
 import math
+from pathlib import Path
 
 import pandas as pd
 import numpy as np
@@ -30,45 +31,51 @@ import PIL.Image
 
 from utils import FullPairComparer, AverageMeter, evaluate, plot_roc, plot_DET_with_EER, plot_density, accuracy
 from models import MNASNet_Modified as net
-from benchmark_verification.hands_loader import get_dataloader
+from benchmark_verification.hands_loader import get_dataloader_11K
+from benchmark_verification.tongji_loader import get_dataloader_tongji
 from losses import *
 
 
 parser = argparse.ArgumentParser(description='Vein Verification')
-
+parser.add_argument('--train-dataset', default='11K', type=str,
+                    help='dataset to use: 11K or tongji')
+parser.add_argument('--eval-dataset', default='11K', type=str,
+                    help='dataset to use: 11K or tongji')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='SE',
                     help='start epoch (default: 0)')
 parser.add_argument('--num-epochs', default=1, type=int, metavar='NE',
                     help='number of epochs to train (default: 90)')
-parser.add_argument('--num-classes', default=400, type=int, metavar='NC',
-                    help='number of clases (default: 318)')
+parser.add_argument('--num-classes', default=600, type=int, metavar='NC',
+                    help='number of clases')
 parser.add_argument('--embedding-size', default=512, type=int, metavar='ES',
-                    help='embedding size (default: 128)')
+                    help='embedding size')
 parser.add_argument('--batch-size', default=32, type=int, metavar='BS',
-                    help='batch size (default: 128)')
-parser.add_argument('--num-workers', default=16, type=int, metavar='NW',
-                    help='number of workers (default: 8)')
+                    help='batch size')
+parser.add_argument('--num-workers', default=8, type=int, metavar='NW',
+                    help='number of workers')
 parser.add_argument('--learning-rate', default=0.01, type=float, metavar='LR',
                     help='learning rate') #seems best when SWG off
 parser.add_argument('--weight-decay', default=0.0001, type=float, metavar='WD',
-                    help='weight decay (default: 0.01)') #seems best when SWG off
+                    help='weight decay') #seems best when SWG off
 parser.add_argument('--scale-rate', default=32, type=float, metavar='SC',
-                    help='scale rate (default: 0.001)')
+                    help='scale rate')
 parser.add_argument('--margin', default=0.5, type=float, metavar='MG',
                     help='margin')
-parser.add_argument('--database-dir', default='/media/back/home/chuck/Dataset/11K_Hands_processed', type=str,
-                    help='path to the database root directory')
-parser.add_argument('--train-dir', default='Contactless_Knuckle_Palm_Print_and_Vein_Dataset/CSVFiles/train_dis.csv', type=str,
+parser.add_argument('--database-dir-11K', default='/media/back/home/chuck/Dataset/11K_Hands_processed', type=str,
+                    help='path to the 11K hands database root directory')
+parser.add_argument('--database-dir-tongji', default='/media/back/home/chuck/Dataset/Tongji_ROI', type=str,
+                    help='path to the Tongji database root directory')
+parser.add_argument('--train-dir', default='train.csv', type=str,
                     help='path to train root dir')
-parser.add_argument('--valid-dir', default='Contactless_Knuckle_Palm_Print_and_Vein_Dataset/CSVFiles/val_dis.csv', type=str,
+parser.add_argument('--valid-dir', default='valid.csv', type=str,
                     help='path to valid root dir')
-parser.add_argument('--test-dir', default='Contactless_Knuckle_Palm_Print_and_Vein_Dataset/CSVFiles/test_pairs_dis.csv', type=str,
+parser.add_argument('--test-dir', default='test.csv', type=str,
                     help='path to test root dir')
 parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                     help='evaluate model on test set')
 parser.add_argument('--type', default='aamp', type=str, metavar='MG',
                     help='type')
-parser.add_argument('--outdir', default='model_11K/', type=str,
+parser.add_argument('--outdir', default='results/model_11K', type=str,
                     help='Out Directory')
 parser.add_argument('--logdir', default='logs.csv', type=str,
                     help='path to log dir')
@@ -80,10 +87,17 @@ best_losss = 100
 global best_test
 best_test = 100
 
+if not os.path.exists(args.outdir):
+    os.makedirs(args.outdir)
+
 log_root = logging.getLogger()
 log_root.setLevel(logging.INFO)
 formatter = logging.Formatter("%(asctime)s-%(message)s")
-handler_file = logging.FileHandler(os.path.join(args.outdir, "training.log"))
+log_path = os.path.join(args.outdir, "training.log")
+if not os.path.exists(log_path):
+    os.makedirs(args.outdir, exist_ok=True)
+    Path(log_path).touch()
+handler_file = logging.FileHandler(log_path)
 handler_stream = logging.StreamHandler(sys.stdout)
 handler_file.setFormatter(formatter)
 handler_stream.setFormatter(formatter)
@@ -93,8 +107,6 @@ log_root.addHandler(handler_stream)
 summary_writer = SummaryWriter(log_dir=os.path.join(args.outdir, "tensorboard"))
 
 def main():
-    if not os.path.exists(args.outdir):
-        os.makedirs(args.outdir)
 
     criterion = CrossEntropyLoss().cuda()
     if args.type == 'norm':
@@ -130,46 +142,53 @@ def main():
 
 
     #scheduler = lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
-    scheduler = lr_scheduler.ReduceLROnPlateau(optimizer, cooldown=2, verbose=True)
+    scheduler = lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, cooldown=2, verbose=True)
+
+    data_loaders_11K = get_dataloader_11K(args.database_dir_11K, batch_size=args.batch_size, num_workers=args.num_workers)
+    data_loaders_tongji = get_dataloader_tongji(args.database_dir_tongji, batch_size=args.batch_size, num_workers=args.num_workers)
+    if args.train_dataset == '11K':
+        train_data_loaders = data_loaders_11K
+    elif args.train_dataset == 'tongji':
+        train_data_loaders = data_loaders_tongji
+    if args.eval_dataset == '11K':
+        eval_data_loaders = data_loaders_11K
+    elif args.eval_dataset == 'tongji':
+        eval_data_loaders = data_loaders_tongji
 
     if args.start_epoch != 0:
         checkpoint = torch.load(args.outdir+'/model_checkpoint.pth.tar')
         args.start_epoch = checkpoint['epoch']
         model.load_state_dict(checkpoint['state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer'])
+        # optimizer.load_state_dict(checkpoint['optimizer'])
+        scheduler = lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, cooldown=2, verbose=True)
 
     if args.evaluate:
         checkpoint = torch.load(args.outdir + '/model_best.pth.tar')
         args.start_epoch = checkpoint['epoch']
         model.load_state_dict(checkpoint['state_dict'], strict=False)
-        optimizer.load_state_dict(checkpoint['optimizer'])
-        # data_loaders = get_dataloader(args.database_dir, args.train_dir, args.valid_dir, args.test_dir,
-        #                               args.batch_size, args.num_workers)
-        # test(model, data_loaders['test'], '00', is_graph=True)
+        # optimizer.load_state_dict(checkpoint['optimizer'])
+        test(model, eval_data_loaders['test'], args.eval_dataset, is_graph=True)
     else:
-        data_loaders = get_dataloader(args.database_dir, batch_size=args.batch_size)
-
         for epoch in range(args.start_epoch, args.num_epochs + args.start_epoch):
             print(80 * '=')
             print('Epoch [{}/{}]'.format(epoch, args.num_epochs + args.start_epoch - 1))
 
 
-            train(model, optimizer, epoch, data_loaders["train"], criterion, loss_metric)
-            is_best, acc, loss = validate(model, optimizer, epoch, data_loaders["valid"], criterion, loss_metric)
+            train(model, optimizer, epoch, train_data_loaders["train"], criterion, loss_metric)
+            is_best, acc, loss = validate(model, optimizer, epoch, train_data_loaders["valid"], criterion, loss_metric)
             scheduler.step(loss)
             lr = scheduler._last_lr[0]
             # if lr < 1E-5:
             #     break
             if is_best and acc > 100:
-                test(model, data_loaders["test"], epoch, is_graph=True)
+                test(model, eval_data_loaders["test"], epoch, is_graph=True)
 
-        # epoch = 99
         print(80 * '=')
 
         ## MODEL EVALUATION LOGGING ##
         checkpoint = torch.load(args.outdir + '/model_best.pth.tar')
         model.load_state_dict(checkpoint['state_dict'])
-        EER = test(model, data_loaders["test"], epoch, is_graph=True)
+        EER = test(model, eval_data_loaders["test"], epoch, is_graph=True)
 
         header = ['weight_decay', 'learning_rate', 'scale', 'margin', 'type', 'batch_size', 'embedding_size', 'EER', 'out_dir']
         info = [args.weight_decay, args.learning_rate, args.scale_rate, args.margin, args.type, args.batch_size, args.embedding_size, EER, args.outdir]
@@ -287,7 +306,7 @@ def train(model, optimizer, epoch, dataloader, criterion, metric):
         for batch_idx, (data, target, _) in enumerate(dataloader):
             optimizer.zero_grad()
             target = target.cuda()
-            outputs = model(data.cuda())
+            outputs = model(data.cuda(), train=True)
             if metric is not None:
                 outputs = metric(outputs, target)
             loss = criterion(outputs, target)

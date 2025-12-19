@@ -88,11 +88,11 @@ class CosineDistance(nn.Module):
         super(CosineDistance, self).__init__()
 
     def forward(self, x1, x2):
-        return self.cosinedist(x1,x2)
+        return self.cosinedist(x1, x2)
 
-    def cosinedist(self,x, y):
-        sim=F.cosine_similarity(x,y)
-        return 1-sim
+    def cosinedist(self, x, y):
+        sim = F.cosine_similarity(x, y)
+        return 1 - sim
 
 
 def feature_binarizer(data):

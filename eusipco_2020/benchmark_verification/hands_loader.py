@@ -27,37 +27,40 @@ class DataReader(Dataset):
             if "right" in row["aspectOfHand"]:
                 self.df.at[index, "id"] = str(row["id"]) + "_R"
 
-    def make_split(self):
+    def make_split(self, version=None):
         base_path = os.path.dirname(self.hands_path)
-        train_path = os.path.join(base_path, "train.csv")
-        valid_path = os.path.join(base_path, "valid.csv")
-        test_path = os.path.join(base_path, "test.csv")
-        N = len(self)
-        samples_array = np.arange(N)
-        train_idx, test_idx = train_test_split(samples_array, test_size=0.2)
-        train_df = self.df.iloc[train_idx]
-        test_df = self.df.iloc[test_idx]
+        if version is None:
+            train_path = os.path.join(base_path, "train.csv")
+            valid_path = os.path.join(base_path, "valid.csv")
+            test_path = os.path.join(base_path, "test.csv")
+            N = len(self)
+            samples_array = np.arange(N)
+            train_idx, test_idx = train_test_split(samples_array, test_size=0.2)
+            train_df = self.df.iloc[train_idx]
+            test_df = self.df.iloc[test_idx]
 
-        train_id = {}
-        for index, row in train_df.iterrows():
-            if row["id"] not in train_id:
-                train_id[row["id"]] = len(train_id)
-            train_df.at[index, "id"] = train_id[row["id"]]
-        test_id = {}
-        for index, row in test_df.iterrows():
-            if row["id"] not in test_id:
-                test_id[row["id"]] = len(test_id)
-            test_df.at[index, "id"] = test_id[row["id"]]
+            train_id = {}
+            for index, row in train_df.iterrows():
+                if row["id"] not in train_id:
+                    train_id[row["id"]] = len(train_id)
+                train_df.at[index, "id"] = train_id[row["id"]]
+            test_id = {}
+            for index, row in test_df.iterrows():
+                if row["id"] not in test_id:
+                    test_id[row["id"]] = len(test_id)
+                test_df.at[index, "id"] = test_id[row["id"]]
 
-        N = len(train_df)
-        samples_array = np.arange(N)
-        train_idx, valid_idx = train_test_split(samples_array, test_size=0.2)
-        train_df_train = train_df.iloc[train_idx]
-        train_df_valid = train_df.iloc[valid_idx]
+            N = len(train_df)
+            samples_array = np.arange(N)
+            train_idx, valid_idx = train_test_split(samples_array, test_size=0.2)
+            train_df_train = train_df.iloc[train_idx]
+            train_df_valid = train_df.iloc[valid_idx]
 
-        train_df_train.to_csv(train_path, index=False)
-        train_df_valid.to_csv(valid_path, index=False)
-        test_df.to_csv(test_path, index=False)
+            train_df_train.to_csv(train_path, index=False)
+            train_df_valid.to_csv(valid_path, index=False)
+            test_df.to_csv(test_path, index=False)
+        elif version == "unique_palm":
+            pass
 
     def __getitem__(self, index):
         im_file = self.df['imageName'][index]
@@ -75,7 +78,7 @@ class DataReader(Dataset):
 
 
 class SingleReader(Dataset):
-    def __init__(self, hands_path, csv_path, transform=None, rotateROI=False, HorizontalFlip=False):
+    def __init__(self, hands_path, csv_path, transform, rotateROI=False, HorizontalFlip=False):
         self.hands_path = Path(hands_path)
         self.transform = transform
         self.df = pd.read_csv(csv_path)
@@ -119,7 +122,7 @@ class SingleReader(Dataset):
 
 
 class PairReader(Dataset):
-    def __init__(self, hands_path, csv_path, transform=None):
+    def __init__(self, hands_path, csv_path, transform):
         self.hands_path = Path(hands_path)
         self.transform = transform
         self.df = pd.read_csv(csv_path)
@@ -161,9 +164,15 @@ class PairReader(Dataset):
         return self.total_len
 
 
-def get_dataloader(database_dir, batch_size=32, num_workers=8):
-    train_csv = os.path.join(database_dir, "train.csv")
-    valid_csv = os.path.join(database_dir, "valid.csv")
+def get_dataloader_11K(database_dir, batch_size=32, num_workers=8, truncate=False):
+    if truncate:
+        train_path = "train_.csv"
+        valid_path = "valid_.csv"
+    else:
+        train_path = "train.csv"
+        valid_path = "valid.csv"
+    train_csv = os.path.join(database_dir, train_path)
+    valid_csv = os.path.join(database_dir, valid_path)
     test_csv = os.path.join(database_dir, "test.csv")
     Hands_path = os.path.join(database_dir, "Hands_crop/")
     im_size = (128, 128)
@@ -182,13 +191,40 @@ def get_dataloader(database_dir, batch_size=32, num_workers=8):
     test_dataset = PairReader(Hands_path, test_csv, transforms.Compose([transforms.Resize(im_size),
                                                                         transforms.ToTensor(),
                                                                         normalize]))
-
     dataloaders = {}
-    dataloaders["train"] = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
-    dataloaders["valid"] = DataLoader(valid_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
+    dataloaders["train"] = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True, drop_last=True)
+    dataloaders["valid"] = DataLoader(valid_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True, drop_last=True)
     dataloaders["test"] = DataLoader(test_dataset, batch_size=1024, shuffle=False, num_workers=num_workers, pin_memory=True)
     return dataloaders
 
+
+def jpg_dataloader(paths):
+    im_size = (128, 128)
+    mean = [0.5, 0.5, 0.5]
+    std = [0.5, 0.5, 0.5]
+    normalize = transforms.Normalize(mean=mean, std=std)
+    N = len(paths)
+    pair_idxs = []
+    for i in range(N):
+        for j in range(i+1, N):
+            pair_idxs.append((i, j))
+    dataset = []
+    for idx in pair_idxs:
+        img1 = PIL.Image.open(paths[idx[0]])
+        img1 = img1.convert('RGB')
+        img1 = transforms.Compose([transforms.Resize(im_size),
+                                   transforms.ToTensor(),
+                                   normalize])(img1)
+        img2 = PIL.Image.open(paths[idx[1]])
+        img2 = img2.convert('RGB')
+        img2 = transforms.Compose([transforms.Resize(im_size),
+                                   transforms.ToTensor(),
+                                   normalize])(img2)
+        dataset.append((img1, img2, str(paths[idx[0]]), str(paths[idx[1]])))
+
+    dataloader = DataLoader(dataset, batch_size=32, shuffle=False, num_workers=8, pin_memory=True)
+    return dataloader
+    
 
 if __name__ == '__main__':
     database_dir = "/media/back/home/chuck/Dataset/11K_Hands_processed"
@@ -203,4 +239,9 @@ if __name__ == '__main__':
                                                                         normalize]))
     dataset.make_split()
 
-    data_loaders = get_dataloader(database_dir)
+    # data_loaders = get_dataloader(database_dir)
+    # paths = ['874318_reg.jpg', '29116174_reg.jpg', '29121335_reg.jpg']
+    # dataloader = jpg_dataloader(paths)
+    # for batch in dataloader:
+    #     img1, img2, path1, path2 = batch
+    #     print(img1.shape, img2.shape, path1, path2)
